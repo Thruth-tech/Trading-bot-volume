@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trading Bot Volume</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+<style>
+  :root{--bg:#141414;--panel:#1b1b1d;--ink:#e8e8e8;--muted:#8a8a8a;--line:#2a2a2a;--accent:#ccff00}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+  .wrap{display:flex;flex-direction:column;height:100%;padding:14px 16px 10px}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:10px}
+  h1{font-size:17px;margin:0;font-weight:700}
+  .sub{color:var(--muted);font-size:12px;margin-top:3px}
+  .controls{display:flex;gap:6px;flex-wrap:wrap}
+  .seg{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:none;border:0;color:var(--muted);padding:6px 10px;font:inherit;font-size:12px;cursor:pointer}
+  .seg button.on{background:#2c2c30;color:var(--ink)}
+  #chart{flex:1 1 0;min-height:280px;margin-top:8px}
+  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:12px;color:var(--muted)}
+  .stats b{color:var(--ink);font-weight:600}
+  footer{color:var(--muted);font-size:11px;margin-top:4px}
+  details{color:var(--muted);font-size:11px;margin-top:4px}
+  summary{cursor:pointer}
+  #status{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);pointer-events:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Daily volume by chain</h1>
+      <div class="sub" id="sub">Trading terminals &amp; bots · live from DefiLlama</div>
+    </div>
+    <div class="controls">
+      <div class="seg" id="mode"><button data-v="vol" class="on">Volume</button><button data-v="pct">Share</button></div>
+      <div class="seg" id="range"><button data-v="30">30D</button><button data-v="90">90D</button><button data-v="200" class="on">200D</button></div>
+    </div>
+  </header>
+  <div class="stats" id="stats"></div>
+  <div id="chart"></div>
+  <details><summary>Notes &amp; method</summary><footer id="foot"></footer></details>
+</div>
+<div id="status">Loading live data from DefiLlama…</div>
+<script>
+const BOTS=['gmgn','fomo-wallet','axiom','pump.fun-mobile-app','terminal','trojan','photon','bullx','bonkbot','copyfomo'];
+const LABEL={'gmgn':'GMGN','fomo-wallet':'Fomo','axiom':'Axiom','pump.fun-mobile-app':'pump.fun app','terminal':'Terminal','trojan':'Trojan','photon':'Photon','bullx':'BullX','bonkbot':'BonkBot','copyfomo':'copyfomo'};
+const CH={'Solana':'solana','Robinhood Chain':'robinhood','BSC':'bnb','Base':'base','Ethereum':'ethereum','Arc':'arc','Hyperliquid L1':'hyperevm','X Layer':'xlayer','Monad':'monad','Arbitrum':'arbitrum','MegaETH':'megaeth','Avalanche':'avalanche_c','Sonic':'sonic','Ink':'ink'};
+const COL={solana:'#7c5eea',robinhood:'#ccff00',bnb:'#f3bb2e',base:'#0153ff',ethereum:'#637feb',arc:'#3d6b8d',hyperevm:'#97fce4',xlayer:'#a7a7a7',monad:'#836ef9',megaeth:'#5a5a5e',arbitrum:'#28a0f0',avalanche_c:'#e84142',sonic:'#f29258',ink:'#7132f5',other:'#6b6b70'};
+const API='https://api.llama.fi';
+const ch=echarts.init(document.getElementById('chart'),null,{renderer:'canvas'});
+addEventListener('resize',()=>ch.resize());new ResizeObserver(()=>ch.resize()).observe(document.getElementById('chart'));
+document.addEventListener('toggle',()=>ch.resize(),true);
+let STATE={mode:'vol',range:200,data:null};
+
+const day=ts=>new Date(ts*1000).toISOString().slice(0,10);
+const val=x=>typeof x==='object'&&x?Object.values(x).reduce((a,b)=>a+(+b||0),0):(+x||0);
+const fmt=v=>v>=1e9?'$'+(v/1e9).toFixed(2)+'b':v>=1e6?'$'+(v/1e6).toFixed(1)+'m':v>=1e3?'$'+(v/1e3).toFixed(0)+'k':'$'+v.toFixed(0);
+const addDays=(d,n)=>{const t=new Date(d+'T00:00:00Z');t.setUTCDate(t.getUTCDate()+n);return t.toISOString().slice(0,10)};
+async function getJSON(u){for(let i=0;i<3;i++){try{const r=await fetch(u);if(r.ok)return r.json()}catch(e){}await new Promise(r=>setTimeout(r,800*(i+1)))}throw new Error('fetch failed: '+u)}
+
+async function load(){
+  const [feesRaw,...vols]=await Promise.all([
+    getJSON(`${API}/summary/fees/fomo-wallet?dataType=dailyFees`),
+    ...BOTS.map(b=>getJSON(`${API}/summary/dexs/${b}?dataType=dailyVolume`).catch(()=>null))
+  ]);
+  // fomo fee share by chain (DefiLlama books all fomo volume on Solana -> split it by fee share)
+  const fees={};
+  for(const [ts,v] of feesRaw.totalDataChartBreakdown||[]){const s={};let t=0;for(const[c,x] of Object.entries(v)){const k=CH[c]||c.toLowerCase();s[k]=(s[k]||0)+val(x);t+=val(x)}if(t>0){for(const k in s)s[k]/=t;fees[day(ts)]=s}}
+  const raw={},first={},live=[];
+  BOTS.forEach((b,i)=>{const j=vols[i];if(!j||!j.totalDataChartBreakdown?.length)return;live.push(b);raw[b]={};
+    for(const [ts,v] of j.totalDataChartBreakdown){const r={};for(const[c,x] of Object.entries(v)){const k=CH[c]||c.toLowerCase();r[k]=(r[k]||0)+val(x)}raw[b][day(ts)]=r}
+    first[b]=Object.keys(raw[b]).sort()[0]});
+  const today=new Date().toISOString().slice(0,10);           // today's UTC day is still in progress -> never used
+  const start=live.filter(b=>b!=='copyfomo').map(b=>first[b]).sort().pop();
+  // RULE: a day is shown if at most ONE bot is missing it; that bot gets its previous day's numbers.
+  // Real numbers replace the filled ones automatically on the next load once DefiLlama posts them.
+  let end=null;
+  for(let d=start;d<today;d=addDays(d,1)){const miss=live.filter(b=>d>=first[b]&&!raw[b][d]);if(miss.length<=1)end=d;else break}
+  const days=[],vol={},filled=[];let share=null;
+  for(let d=start;d<=end;d=addDays(d,1)){
+    days.push(d);vol[d]={};if(fees[d])share=fees[d];
+    for(const b of live){if(d<first[b])continue;let rec=raw[b][d];
+      if(!rec){const prev=Object.keys(raw[b]).filter(k=>k<d).sort().pop();rec=raw[b][prev];filled.push([b,d])}
+      for(const[c,x] of Object.entries(rec)){
+        if(b==='fomo-wallet'&&share){for(const[k,w] of Object.entries(share))vol[d][k]=(vol[d][k]||0)+x*w}
+        else vol[d][c]=(vol[d][c]||0)+x}}}
+  const missingBots=BOTS.filter(b=>!live.includes(b));
+  return {days,vol,filled,missingBots,end};
+}
+
+function render(){
+  const D=STATE.data;if(!D)return;
+  const days=D.days.slice(-STATE.range);
+  const tot={};for(const d of days)for(const[c,v] of Object.entries(D.vol[d]))tot[c]=(tot[c]||0)+v;
+  const order=Object.keys(tot).sort((a,b)=>tot[b]-tot[a]);
+  const main=order.slice(0,7),other=order.slice(7);
+  const keys=other.length?[...main,'other']:main;
+  const get=(d,c)=>c==='other'?other.reduce((a,k)=>a+(D.vol[d][k]||0),0):(D.vol[d][c]||0);
+  const dayTot=days.map(d=>Object.values(D.vol[d]).reduce((a,b)=>a+b,0));
+  const pct=STATE.mode==='pct';
+  const series=keys.map(c=>({name:c,type:'bar',stack:'s',barCategoryGap:'18%',itemStyle:{color:COL[c]||'#888'},emphasis:{focus:'series'},
+    data:days.map((d,i)=>pct?(dayTot[i]?100*get(d,c)/dayTot[i]:0):get(d,c))}));
+  ch.setOption({
+    backgroundColor:'transparent',animation:false,
+    grid:{left:56,right:110,top:10,bottom:30},
+    legend:{type:'scroll',orient:'vertical',right:0,top:6,textStyle:{color:'#e8e8e8'},itemWidth:12,itemHeight:12,data:[...keys].reverse()},
+    tooltip:{trigger:'axis',axisPointer:{type:'shadow'},backgroundColor:'#1f1f22',borderColor:'#333',textStyle:{color:'#e8e8e8',fontSize:12},
+      formatter:ps=>{const i=ps[0].dataIndex;const d=days[i];let h=`<b>${d}</b> · total ${fmt(dayTot[i])}<br>`;
+        [...ps].sort((a,b)=>b.value-a.value).forEach(p=>{if(p.value>0)h+=`${p.marker}${p.seriesName}: ${pct?p.value.toFixed(1)+'%':fmt(p.value)}<br>`});
+        const f=D.filled.filter(x=>x[1]===d).map(x=>LABEL[x[0]]);if(f.length)h+=`<span style="color:#f3bb2e">filled from previous day: ${f.join(', ')}</span>`;return h}},
+    xAxis:{type:'category',data:days,axisLine:{lineStyle:{color:'#333'}},axisTick:{show:false},
+      axisLabel:{color:'#8a8a8a',formatter:v=>{const t=new Date(v+'T00:00:00Z');return t.toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'UTC'})}}},
+    yAxis:{type:'value',max:pct?100:null,splitLine:{lineStyle:{color:'#2a2a2a'}},axisLabel:{color:'#8a8a8a',formatter:v=>pct?v+'%':fmt(v)}},
+    series
+  },true);
+  // stats
+  const sum=a=>a.reduce((x,y)=>x+y,0);
+  const n=Math.min(30,Math.floor(D.days.length/2));
+  const all=D.days.map(d=>Object.values(D.vol[d]).reduce((a,b)=>a+b,0));
+  const l30=sum(all.slice(-n)),p30=sum(all.slice(-2*n,-n));
+  const t30={};for(const d of D.days.slice(-n))for(const[c,v] of Object.entries(D.vol[d]))t30[c]=(t30[c]||0)+v;
+  const top=Object.entries(t30).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([c,v])=>`${c} <b>${(100*v/l30).toFixed(1)}%</b>`).join(' · ');
+  document.getElementById('stats').innerHTML=
+    `<span>Latest day <b>${fmt(all[all.length-1])}</b></span><span>Last ${n}d <b>${fmt(l30)}</b> <span style="color:${l30>=p30?'#9be37a':'#ff7a7a'}">${p30?((l30/p30-1)*100>=0?'+':'')+((l30/p30-1)*100).toFixed(0)+'% vs prior':''}</span></span><span>${n}d share: ${top}</span>`;
+}
+
+function setSeg(id,key,parse){document.querySelectorAll(`#${id} button`).forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(`#${id} button`).forEach(x=>x.classList.toggle('on',x===b));STATE[key]=parse(b.dataset.v);render()})}
+setSeg('mode','mode',v=>v);setSeg('range','range',v=>+v);
+
+load().then(D=>{
+  STATE.data=D;document.getElementById('status').remove();
+  document.getElementById('sub').textContent=`Trading terminals & bots · ${D.days[0]} → ${D.end} (UTC) · live from DefiLlama · loaded ${new Date().toLocaleString('en-GB',{timeZone:'Asia/Bangkok',hour12:false})} BKK`;
+  const g={};D.filled.filter(x=>D.days.slice(-200).includes(x[1])).forEach(([b,d])=>(g[LABEL[b]]=g[LABEL[b]]||[]).push(d.slice(5)));
+  document.getElementById('foot').textContent=
+    `Bots: ${BOTS.map(b=>LABEL[b]).join(', ')}. Fomo volume split across chains by its daily fee share. A day shows once all but at most one bot have posted; the missing bot uses its previous day until DefiLlama posts the real number.`
+    +(Object.keys(g).length?` Filled days: `+Object.entries(g).map(([b,ds])=>`${b} ${ds.join(', ')}`).join('; ')+'.':'')
+    +(D.missingBots.length?` Unavailable right now: ${D.missingBots.map(b=>LABEL[b]).join(', ')}.`:'');
+  render();ch.resize();
+}).catch(e=>{document.getElementById('status').textContent='Could not load DefiLlama data — refresh to retry. ('+e.message+')'});
+</script>
+</body>
+</html>
